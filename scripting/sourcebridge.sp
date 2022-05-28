@@ -7,7 +7,7 @@
 #define PLUGIN_NAME 				"Sourcebridge"
 #define PLUGIN_AUTHOR 				"gabuch2"
 #define PLUGIN_DESCRIPTION    		"Allows chat connectivity between SRCDS and a Matterbridge instance"
-#define PLUGIN_VERSION 				"0.9.2 beta"
+#define PLUGIN_VERSION 				"0.9.3 alpha"
 #define PLUGIN_WEBSITE 				"https://www.daijobu.org/"
 
 #define BRIDGE_MAX_MESSAGE_LENGTH 1024
@@ -33,6 +33,7 @@ ConVar g_cvarOutgoing_Chat_ZeroifyAtSign;
 ConVar g_cvarOutgoing_Join;
 ConVar g_cvarOutgoing_Quit;
 ConVar g_cvarOutgoing_DisplayMap;
+ConVar g_cvarOutgoing_IgnoreBang;
 ConVar g_cvarRetry_Delay;
 
 char g_sIncomingUrl[BRIDGE_MAX_URL_LENGTH];
@@ -71,6 +72,7 @@ public OnPluginStart()
     g_cvarOutgoing_Join = CreateConVar("sm_sourcebridge_outgoing_join", "1", "Define whether the plugin should output join messages.");
     g_cvarOutgoing_Quit = CreateConVar("sm_sourcebridge_outgoing_quit", "1", "Define whether the plugin should output leave messages.");
     g_cvarOutgoing_DisplayMap = CreateConVar("sm_sourcebridge_outgoing_display_map", "1", "Define whether the plugin should output the map name at the start of the game.");
+    g_cvarOutgoing_IgnoreBang = CreateConVar("sm_sourcebridge_outgoing_ignore_bang", "1", "Define whether the plugin should ignore player messages starting with '!' (public client commands).");
     g_cvarRetry_Delay = CreateConVar("sm_sourcebridge_retry_delay", "3", "Define how much Sourcebridge should wait before querying new incoming messages.\nIt takes effect after restart.");
 
     //Execute the config file
@@ -188,6 +190,9 @@ public Action OnClientSayCommand(int iClient, const char[] sCommand, const char[
 {
     if(GetConVarBool(g_cvarOutgoing))
     {
+        if(GetConVarBool(g_cvarOutgoing_IgnoreBang) && sArgs[0] == '!')
+            return Plugin_Continue;
+
         if(IsPluginDebugging(INVALID_HANDLE))
             PrintToServer("[Sourcebridge Debug] I want to send %N's message to the bridge: %s.", iClient, sArgs);
         char sUsername[MAX_NAME_LENGTH], sText[BRIDGE_MAX_MESSAGE_LENGTH];
@@ -214,7 +219,7 @@ public void OnClientAuthorized(int iClient, const char[] sAuth)
         if(strlen(g_sSteamToken) > 0)
         {
             char sApiUrl[BRIDGE_MAX_URL_LENGTH], sSteamId64[MAX_NAME_LENGTH];
-            GetClientAuthId(iClient, AuthId_SteamID64, sSteamId64, sizeof(sSteamId64), true);
+            GetClientAuthId(iClient, AuthId_SteamID64, sSteamId64, sizeof(sSteamId64));
             Format(sApiUrl, sizeof(sApiUrl), "http://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/?key=%s&steamids=%s", g_sSteamToken, sSteamId64);
             HTTPRequest http_hSteamReq = new HTTPRequest(sApiUrl); 
             http_hSteamReq.Get(OnPlayerSummaries, iClient);
