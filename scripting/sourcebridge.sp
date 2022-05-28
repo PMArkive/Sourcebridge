@@ -29,7 +29,7 @@ ConVar g_cvarOutgoing;
 ConVar g_cvarOutgoing_SystemName;
 ConVar g_cvarOutgoing_SystemAvatarUrl;
 ConVar g_cvarOutgoing_Chat_ZeroifyAtSign;
-//ConVar g_cvarOutgoing_Kills; currently a todo
+ConVar g_cvarOutgoing_Kills;
 ConVar g_cvarOutgoing_Join;
 ConVar g_cvarOutgoing_Quit;
 ConVar g_cvarOutgoing_DisplayMap;
@@ -68,7 +68,7 @@ public OnPluginStart()
     g_cvarOutgoing_SystemName = CreateConVar("sm_sourcebridge_outgoing_system_name", "Server", "The name of system messages whenever they get send to the Matterbridge instance (join/leaves, kills, etc).\nIt takes effect after restart.");
     g_cvarOutgoing_SystemAvatarUrl = CreateConVar("sm_sourcebridge_outgoing_system_avatar", "", "URL pointing to the avatar system messages should use.\nIt takes effect after restart.");
     g_cvarOutgoing_Chat_ZeroifyAtSign = CreateConVar("sm_sourcebridge_outgoing_chat_zwsp_at", "1", "Define whether the plugin should add a zero-width space after the @ sign in the messages.");
-    // g_cvarOutgoing_Kills = CreateConVar("sm_sourcebridge_outgoing_kills", "0", "Define whether the plugin should output kill messages."); TODO, it's not done yet
+    g_cvarOutgoing_Kills = CreateConVar("sm_sourcebridge_outgoing_kills", "0", "Define whether the plugin should output kill messages.\nIt takes effect after restart."); 
     g_cvarOutgoing_Join = CreateConVar("sm_sourcebridge_outgoing_join", "1", "Define whether the plugin should output join messages.");
     g_cvarOutgoing_Quit = CreateConVar("sm_sourcebridge_outgoing_quit", "1", "Define whether the plugin should output leave messages.");
     g_cvarOutgoing_DisplayMap = CreateConVar("sm_sourcebridge_outgoing_display_map", "1", "Define whether the plugin should output the map name at the start of the game.");
@@ -127,7 +127,43 @@ public void OnConfigsExecuted()
             Format(sMessage, sizeof(sMessage), "* Starting map %s.", sMapname);
             SendMessageRest(g_sSystemName, sMessage, g_sSystemAvatar);
         }
+
+        if(GetConVarBool(g_cvarOutgoing_Kills))
+            HookEvent("player_death", PlayerKilled, EventHookMode_Post);
     }
+}
+
+public Action PlayerKilled(Handle hEvent, const char[] strName, bool bDontBroadcast)
+{
+    int victim = GetClientOfUserId(GetEventInt(hEvent, "userid", 0));
+    int attacker = GetClientOfUserId(GetEventInt(hEvent, "attacker", 0));
+
+    if(victim)
+    {
+        char sMessage[MAX_MESSAGE_LENGTH];
+
+        if(attacker)
+        {
+            if(IsClientInGame(attacker))
+            {
+                if(attacker == victim)
+                    Format(sMessage, sizeof(sMessage), "* %N commited suicide.", victim);
+                else
+                    Format(sMessage, sizeof(sMessage), "* %N was killed by %N.", victim, attacker);
+            }
+            else
+            {
+                char sClassname[MAX_NAME_LENGTH];
+                GetEdictClassname(attacker, sClassname, sizeof(sClassname));
+                Format(sMessage, sizeof(sMessage), "* %N got killed by a %N.", victim, sClassname);
+            }
+        }
+        else 
+            Format(sMessage, sizeof(sMessage), "* %N died misteriously.", victim);
+
+        SendMessageRest(g_sSystemName, sMessage, g_sSystemAvatar);
+    }
+    
 }
 
 public Action ReadMessagesFromBridge(Handle timer, any param)
