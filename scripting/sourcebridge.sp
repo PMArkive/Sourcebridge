@@ -1,3 +1,9 @@
+#define SOURCEBRIDGE_DEBUG          true
+
+/* 
+    COMPILER OPTIONS END HERE
+ */
+
 #include <sourcemod>
 #include <ripext>
 #include <multicolors>
@@ -10,12 +16,14 @@
 #define PLUGIN_VERSION 				"0.9.3 alpha"
 #define PLUGIN_WEBSITE 				"https://www.daijobu.org/"
 
-#define BRIDGE_MAX_MESSAGE_LENGTH 1024
-#define BRIDGE_MAX_URL_LENGTH     512
-#define BRIDGE_MAX_TOKEN_LENGTH   64
-#define BRIDGE_MAX_GATEWAY_LENGTH 64
-#define BRIDGE_MAX_DOMAIN_LENGTH  128
-#define BRIDGE_MAX_PORT_LENGTH    8
+#define BRIDGE_MAX_MESSAGE_LENGTH   1024
+#define BRIDGE_MAX_URL_LENGTH       512
+#define BRIDGE_MAX_TOKEN_LENGTH     64
+#define BRIDGE_MAX_GATEWAY_LENGTH   64
+#define BRIDGE_MAX_DOMAIN_LENGTH    128
+#define BRIDGE_MAX_PORT_LENGTH      8
+
+#define BRIDGE_REGEX_CHAT_TRIGGER "\"PublicChatTrigger\"\\s+\"(.+?(?=\"))"
 
 ConVar g_cvarEnabled;
 ConVar g_cvarBridgeProtocol;
@@ -33,7 +41,7 @@ ConVar g_cvarOutgoing_Kills;
 ConVar g_cvarOutgoing_Join;
 ConVar g_cvarOutgoing_Quit;
 ConVar g_cvarOutgoing_DisplayMap;
-ConVar g_cvarOutgoing_IgnoreBang;
+ConVar g_cvarOutgoing_IgnorePublicTrigger;
 ConVar g_cvarRetry_Delay;
 
 char g_sIncomingUrl[BRIDGE_MAX_URL_LENGTH];
@@ -45,6 +53,10 @@ char g_sPlayerAvatar[BRIDGE_MAX_URL_LENGTH][MAXPLAYERS];
 char g_sSystemAvatar[BRIDGE_MAX_URL_LENGTH];
 char g_sSystemName[MAX_NAME_LENGTH];
 
+char g_sPublicTrigger[8];
+
+char g_sGameName[MAX_NAME_LENGTH];
+
 public Plugin:myinfo =
 {
 	name 			= PLUGIN_NAME,
@@ -54,7 +66,11 @@ public Plugin:myinfo =
 	url 			= PLUGIN_WEBSITE
 };
 
-public OnPluginStart()
+/* 
+    Plugin Start-up
+ */
+
+public void OnPluginStart()
 {
     g_cvarEnabled = CreateConVar("sm_sourcebridge_enabled", "1", "Enable Sourcebridge.");
     g_cvarBridgeProtocol = CreateConVar("sm_sourcebridge_protocol", "http", "Protocol of your Matterbridge instance (http/https).\nIt takes effect after restart.");
@@ -72,11 +88,13 @@ public OnPluginStart()
     g_cvarOutgoing_Join = CreateConVar("sm_sourcebridge_outgoing_join", "1", "Define whether the plugin should output join messages.");
     g_cvarOutgoing_Quit = CreateConVar("sm_sourcebridge_outgoing_quit", "1", "Define whether the plugin should output leave messages.");
     g_cvarOutgoing_DisplayMap = CreateConVar("sm_sourcebridge_outgoing_display_map", "1", "Define whether the plugin should output the map name at the start of the game.");
-    g_cvarOutgoing_IgnoreBang = CreateConVar("sm_sourcebridge_outgoing_ignore_bang", "1", "Define whether the plugin should ignore player messages starting with '!' (public client commands).");
+    g_cvarOutgoing_IgnorePublicTrigger = CreateConVar("sm_sourcebridge_outgoing_ignore_public_trigger", "1", "Define whether the plugin should ignore player messages starting the configured public trigger ('!' default).");
     g_cvarRetry_Delay = CreateConVar("sm_sourcebridge_retry_delay", "3", "Define how much Sourcebridge should wait before querying new incoming messages.\nIt takes effect after restart.");
 
     //Execute the config file
     AutoExecConfig(true, "sourcebridge");
+
+    GetGameFolderName(g_sGameName, sizeof(g_sGameName));
 }
 
 public void OnConfigsExecuted()
@@ -92,8 +110,9 @@ public void OnConfigsExecuted()
 
     if(GetConVarBool(g_cvarEnabled))
     {
-        if(IsPluginDebugging(INVALID_HANDLE))
-            PrintToServer("[Sourcebridge Debug] Plugin is enabled, procesing initial cvars");
+        #if SOURCEBRIDGE_DEBUG
+        PrintToServer("[Sourcebridge Debug] Plugin is enabled, procesing initial cvars");
+        #endif
         char sPort[BRIDGE_MAX_PORT_LENGTH], 
             sHost[BRIDGE_MAX_DOMAIN_LENGTH], 
             sProtocol[BRIDGE_MAX_PORT_LENGTH];
@@ -109,14 +128,13 @@ public void OnConfigsExecuted()
         GetConVarString(g_cvarOutgoing_SystemAvatarUrl, g_sSystemAvatar, sizeof(g_sSystemAvatar));
         GetConVarString(g_cvarOutgoing_SystemName, g_sSystemName, sizeof(g_sSystemName));
 
-        if(IsPluginDebugging(INVALID_HANDLE))
-        {
-            PrintToServer("[Sourcebridge Debug] Desired URL for incoming messages is %s", g_sIncomingUrl);
-            PrintToServer("[Sourcebridge Debug] Desired URL for outgoing messages is %s", g_sIncomingUrl);
-            PrintToServer("[Sourcebridge Debug] The bridge gateway is %s", g_sGateway);
-            PrintToServer("[Sourcebridge Debug] The secret token is %s", g_sToken);
-            PrintToServer("[Sourcebridge Debug] Creating initial timer of %f", GetConVarFloat(g_cvarRetry_Delay));
-        }
+        #if SOURCEBRIDGE_DEBUG
+        PrintToServer("[Sourcebridge Debug] Desired URL for incoming messages is %s", g_sIncomingUrl);
+        PrintToServer("[Sourcebridge Debug] Desired URL for outgoing messages is %s", g_sIncomingUrl);
+        PrintToServer("[Sourcebridge Debug] The bridge gateway is %s", g_sGateway);
+        PrintToServer("[Sourcebridge Debug] The secret token is %s", g_sToken);
+        PrintToServer("[Sourcebridge Debug] Creating initial timer of %f", GetConVarFloat(g_cvarRetry_Delay));
+        #endif
 
         CreateTimer(GetConVarFloat(g_cvarRetry_Delay), ReadMessagesFromBridge, _, TIMER_REPEAT);
 
@@ -130,8 +148,32 @@ public void OnConfigsExecuted()
 
         if(GetConVarBool(g_cvarOutgoing_Kills))
             HookEvent("player_death", PlayerKilled, EventHookMode_Post);
+
+        if(GetConVarBool(g_cvarOutgoing_IgnorePublicTrigger))
+            FindPublicTrigger();
     }
 }
+
+/* 
+    Tasks
+ */
+
+public Action ReadMessagesFromBridge(Handle timer, any param)
+{
+    if(GetConVarBool(g_cvarIncoming))
+    {
+        #if SOURCEBRIDGE_DEBUG
+        PrintToServer("[Sourcebridge Debug] Executing ReadMessagesFromBridge, procecssing GET request.");
+        #endif
+        HTTPRequest http_hRequest = new HTTPRequest(g_sIncomingUrl); 
+        http_hRequest.SetHeader("Authorization", "Bearer %s", g_sToken); 
+        http_hRequest.Get(OnMessagesReceived);
+    }
+}
+
+/* 
+    Hooks
+ */
 
 public Action PlayerKilled(Handle hEvent, const char[] strName, bool bDontBroadcast)
 {
@@ -159,96 +201,49 @@ public Action PlayerKilled(Handle hEvent, const char[] strName, bool bDontBroadc
             }
         }
         else 
-            Format(sMessage, sizeof(sMessage), "* %N died misteriously.", victim);
+            Format(sMessage, sizeof(sMessage), "* %N died.", victim);
 
         SendMessageRest(g_sSystemName, sMessage, g_sSystemAvatar);
     }
-    
 }
 
-public Action ReadMessagesFromBridge(Handle timer, any param)
-{
-    if(GetConVarBool(g_cvarIncoming))
-    {
-        if(IsPluginDebugging(INVALID_HANDLE))
-            PrintToServer("[Sourcebridge Debug] Executing ReadMessagesFromBridge, procecssing GET request.");
-        HTTPRequest http_hRequest = new HTTPRequest(g_sIncomingUrl); 
-        http_hRequest.SetHeader("Authorization", "Bearer %s", g_sToken); 
-        http_hRequest.Get(OnMessagesReceived);
-    }
-}
-
-public void OnMessagesReceived(HTTPResponse http_oResponse, any uValue)
-{
-    if(IsPluginDebugging(INVALID_HANDLE))
-    {
-        PrintToServer("[Sourcebridge Debug] Got a response, processing.");
-        PrintToServer("[Sourcebridge Debug] Response: %i", http_oResponse.Status);
-    }
-
-    if(http_oResponse.Status == HTTPStatus_OK)
-    {
-        char sResponse[4096]; //probably limited to 1024 anyway, same as AMXX's GRIP
-
-        http_oResponse.Data.ToString(sResponse, sizeof(sResponse));
-
-        if(IsPluginDebugging(INVALID_HANDLE))
-            PrintToServer("[Sourcebridge Debug] JSON String: %s", sResponse);
-
-        JSONArray json_aResponse = view_as<JSONArray>(JSONArray.FromString(sResponse));
-
-        for(int x = 0; x < json_aResponse.Length;x++)
-        {
-            JSONObject json_oMessage = view_as<JSONObject>(json_aResponse.Get(x));
-            char sUsername[MAX_NAME_LENGTH], sText[BRIDGE_MAX_MESSAGE_LENGTH];
-
-            json_oMessage.GetString("username", sUsername, sizeof(sUsername));
-            json_oMessage.GetString("text", sText, sizeof(sText));
-
-            ReplaceString(sText, sizeof(sText), "{", "\\{");
-            ReplaceString(sText, sizeof(sText), "}", "\\}");
-
-            CPrintToChatAll("\x01{green}%s\x01 : %s\x01", sUsername, sText);
-
-            delete json_oMessage;
-        }
-
-        delete json_aResponse;
-    }
-    else
-    {
-        if(IsPluginDebugging(INVALID_HANDLE))
-            PrintToServer("[Sourcebridge Debug] Failed to access URL");
-    }
-}  
-
+/* 
+    Forwards
+ */
 public Action OnClientSayCommand(int iClient, const char[] sCommand, const char[] sArgs)
 {
+    #if SOURCEBRIDGE_DEBUG
+    PrintToServer("[Sourcebridge Debug] sCommand is %s.", sCommand);
+    #endif
+
     if(GetConVarBool(g_cvarOutgoing))
     {
-        if(GetConVarBool(g_cvarOutgoing_IgnoreBang) && sArgs[0] == '!')
+        if(GetConVarBool(g_cvarOutgoing_IgnorePublicTrigger) && StrContains(sArgs, g_sPublicTrigger, true) == 0)
             return Plugin_Continue;
 
-        if(IsPluginDebugging(INVALID_HANDLE))
-            PrintToServer("[Sourcebridge Debug] I want to send %N's message to the bridge: %s.", iClient, sArgs);
+        #if SOURCEBRIDGE_DEBUG
+        PrintToServer("[Sourcebridge Debug] I want to send %N's message to the bridge: %s.", iClient, sArgs);
+        #endif
         char sUsername[MAX_NAME_LENGTH], sText[BRIDGE_MAX_MESSAGE_LENGTH];
         GetClientName(iClient, sUsername, sizeof(sUsername));
         strcopy(sText, sizeof(sText), sArgs);
         if(GetConVarBool(g_cvarOutgoing_Chat_ZeroifyAtSign))
         {
-            if(IsPluginDebugging(INVALID_HANDLE))
-                PrintToServer("[Sourcebridge Debug] Zeroifing at sign.");
+            #if SOURCEBRIDGE_DEBUG
+            PrintToServer("[Sourcebridge Debug] Zeroifing at sign.");
+            #endif
             ReplaceString(sText, sizeof(sText), "@", "@​");
         }
 
-        if(IsPluginDebugging(INVALID_HANDLE))
-            PrintToServer("[Sourcebridge Debug] Calling SendMessageRest().");
+        #if SOURCEBRIDGE_DEBUG
+        PrintToServer("[Sourcebridge Debug] Calling SendMessageRest().");
+        #endif
         SendMessageRest(sUsername, sText, g_sPlayerAvatar[iClient]);
     }
     return Plugin_Continue;
 }  
 
-public void OnClientAuthorized(int iClient, const char[] sAuth)
+public void OnClientPutInServer(int iClient)
 {
     if(!IsFakeClient(iClient))
     {
@@ -283,52 +278,71 @@ public void OnClientDisconnect(int iClient)
     }
 }
 
-public void OnPlayerSummaries(HTTPResponse http_oResponse, any iClient)
+/* 
+    Utils
+ */
+
+bool IsGameMode(const char[] sCompareGameMode)
 {
-    if(IsPluginDebugging(INVALID_HANDLE))
+    //used by L4D2
+    char sGameMode[MAX_NAME_LENGTH];
+    GetConVarString(FindConVar("mp_gamemode"), sGameMode, sizeof(sGameMode));
+	if(StrContains(sGameMode, sCompareGameMode, false) != -1)
+        return true;
+    else
+	    return false;
+}
+
+void FindPublicTrigger()
+{
+    char sSourcemodPath[1024];
+    BuildPath(Path_SM, sSourcemodPath, sizeof(sSourcemodPath), "configs/core.cfg");
+    Handle hCoreFile = OpenFile(sSourcemodPath, "r");
+    if(hCoreFile != INVALID_HANDLE)
     {
-        PrintToServer("[Sourcebridge Debug] Got a response, processing.");
-        PrintToServer("[Sourcebridge Debug] Response: %i", http_oResponse.Status);
+        char sFileLine[1024];
+        char sRegexError[1024];
+        RegexError iRegexError;
+        Regex rTriggerPattern = CompileRegex(BRIDGE_REGEX_CHAT_TRIGGER, 0, sRegexError, sizeof(sRegexError), iRegexError);
+        if(rTriggerPattern != INVALID_HANDLE)
+        {
+            while(ReadFileLine(hCoreFile, sFileLine, sizeof(sFileLine)))
+            {
+                if(MatchRegex(rTriggerPattern, sFileLine, iRegexError) > 0)
+                {
+                    GetRegexSubString(rTriggerPattern, 1, g_sPublicTrigger, sizeof(g_sPublicTrigger));
+                    #if SOURCEBRIDGE_DEBUG
+                    PrintToServer("[Sourcebridge Debug] Public Chat Trigger is %s.", g_sPublicTrigger);
+                    #endif
+
+                    break;
+                }
+                else
+                    continue;
+            }
+        }
+        #if SOURCEBRIDGE_DEBUG
+        else
+            PrintToServer("[Sourcebridge Debug] Can't compile Regex - Error %d: %s.", iRegexError, sRegexError);
+        #endif
     }
-
-    if(http_oResponse.Status == HTTPStatus_OK)
-    {
-        char sResponse[4096];
-        http_oResponse.Data.ToString(sResponse, sizeof(sResponse));
-        if(IsPluginDebugging(INVALID_HANDLE))
-            PrintToServer("[Sourcebridge Debug] JSON String: %s", sResponse);
-
-        //this problably needs a refactor
-        //pull requests welcomed
-        JSONObject json_oHttpResponse = JSONObject.FromString(sResponse);
-        JSONObject json_oResponse = view_as<JSONObject>(json_oHttpResponse.Get("response"));
-        JSONArray json_aPlayers = view_as<JSONArray>(json_oResponse.Get("players"));
-        JSONObject json_oPlayerSummary = view_as<JSONObject>(json_aPlayers.Get(0));
-        json_oPlayerSummary.GetString("avatarfull", g_sPlayerAvatar[iClient], sizeof(g_sPlayerAvatar));
-        if(IsPluginDebugging(INVALID_HANDLE))
-            PrintToServer("[Sourcebridge Debug] Avatar of Client %d is %s", iClient, g_sPlayerAvatar[iClient]);
-
-        delete json_oHttpResponse;
-        delete json_oResponse;
-        delete json_aPlayers;
-        delete json_oPlayerSummary;
-    }
+    
+    delete hCoreFile;
 }
 
 void SendMessageRest(const char[] sUsername, const char[] sText, const char[] sAvatar, const char[] sId = "")
 {
     JSONObject json_oPayload = new JSONObject();
 
-    if(IsPluginDebugging(INVALID_HANDLE))
-    {
-        PrintToServer("[Sourcebridge Debug] Reached SendMessageRest().");
-        PrintToServer("[Sourcebridge Debug] __ Preparing payload __");
-        PrintToServer("[Sourcebridge Debug] text : %s", sText);
-        PrintToServer("[Sourcebridge Debug] username : %s", sUsername);
-        PrintToServer("[Sourcebridge Debug] avatar : %s", sAvatar);
-        PrintToServer("[Sourcebridge Debug] gateway : %s", g_sGateway);
-        PrintToServer("[Sourcebridge Debug] id : %s", sId);
-    }
+    #if SOURCEBRIDGE_DEBUG
+    PrintToServer("[Sourcebridge Debug] Reached SendMessageRest().");
+    PrintToServer("[Sourcebridge Debug] __ Preparing payload __");
+    PrintToServer("[Sourcebridge Debug] text : %s", sText);
+    PrintToServer("[Sourcebridge Debug] username : %s", sUsername);
+    PrintToServer("[Sourcebridge Debug] avatar : %s", sAvatar);
+    PrintToServer("[Sourcebridge Debug] gateway : %s", g_sGateway);
+    PrintToServer("[Sourcebridge Debug] id : %s", sId);
+    #endif
     json_oPayload.SetString("text", sText);
     json_oPayload.SetString("username", sUsername);
     json_oPayload.SetString("avatar", sAvatar); //todo, get avatar from steam API
@@ -342,17 +356,98 @@ void SendMessageRest(const char[] sUsername, const char[] sText, const char[] sA
     delete json_oPayload;  
 }
 
+/* 
+    HTTP Requests
+ */
+
 public void OnMessagesSent(HTTPResponse http_oResponse, any uValue)
 {
-    if(IsPluginDebugging(INVALID_HANDLE))
+    #if SOURCEBRIDGE_DEBUG
+    PrintToServer("[Sourcebridge Debug] Processing OnMessageSent().");
+    PrintToServer("[Sourcebridge Debug] Got a response, processing.");
+    PrintToServer("[Sourcebridge Debug] Response Code: %i", http_oResponse.Status);
+    
+    if(http_oResponse.Status != HTTPStatus_OK)
     {
-        PrintToServer("[Sourcebridge Debug] Processing OnMessageSent().");
-        PrintToServer("[Sourcebridge Debug] Got a response, processing.");
-        PrintToServer("[Sourcebridge Debug] Response: %i", http_oResponse.Status);
+        char sResponse[4096];
+        http_oResponse.Data.ToString(sResponse, sizeof(sResponse));
+        PrintToServer(sResponse);
     }
-    // todo: should we store info about the succesful sent message?
-    // if(response.Status == HTTPStatus_OK)
-    // {
-    //     //
-    // }
+    #endif
+}
+
+public void OnMessagesReceived(HTTPResponse http_oResponse, any uValue)
+{
+    #if SOURCEBRIDGE_DEBUG
+    PrintToServer("[Sourcebridge Debug] Got a response, processing.");
+    PrintToServer("[Sourcebridge Debug] Response: %i", http_oResponse.Status);
+    #endif
+
+    if(http_oResponse.Status == HTTPStatus_OK)
+    {
+        char sResponse[4096]; //probably limited to 1024 anyway, same as AMXX's GRIP
+
+        http_oResponse.Data.ToString(sResponse, sizeof(sResponse));
+
+        #if SOURCEBRIDGE_DEBUG
+        PrintToServer("[Sourcebridge Debug] JSON String: %s", sResponse);
+        #endif
+
+        JSONArray json_aResponse = view_as<JSONArray>(JSONArray.FromString(sResponse));
+
+        for(int x = 0; x < json_aResponse.Length;x++)
+        {
+            JSONObject json_oMessage = view_as<JSONObject>(json_aResponse.Get(x));
+            char sUsername[MAX_NAME_LENGTH], sText[BRIDGE_MAX_MESSAGE_LENGTH];
+
+            json_oMessage.GetString("username", sUsername, sizeof(sUsername));
+            json_oMessage.GetString("text", sText, sizeof(sText));
+
+            ReplaceString(sText, sizeof(sText), "{", "\\{");
+            ReplaceString(sText, sizeof(sText), "}", "\\}");
+
+            CPrintToChatAll("\x01{green}%s\x01 :  %s\x01", sUsername, sText);
+
+            delete json_oMessage;
+        }
+
+        delete json_aResponse;
+    }
+    #if SOURCEBRIDGE_DEBUG
+    else
+        PrintToServer("[Sourcebridge Debug] Failed to access URL");
+    #endif
+}  
+
+public void OnPlayerSummaries(HTTPResponse http_oResponse, any iClient)
+{
+    #if SOURCEBRIDGE_DEBUG
+    PrintToServer("[Sourcebridge Debug] Got a response, processing.");
+    PrintToServer("[Sourcebridge Debug] Response: %i", http_oResponse.Status);
+    #endif
+
+    if(http_oResponse.Status == HTTPStatus_OK)
+    {
+        char sResponse[4096];
+        http_oResponse.Data.ToString(sResponse, sizeof(sResponse));
+        #if SOURCEBRIDGE_DEBUG
+        PrintToServer("[Sourcebridge Debug] JSON String: %s", sResponse);
+        #endif
+
+        //this problably needs a refactor
+        //pull requests welcomed
+        JSONObject json_oHttpResponse = JSONObject.FromString(sResponse);
+        JSONObject json_oResponse = view_as<JSONObject>(json_oHttpResponse.Get("response"));
+        JSONArray json_aPlayers = view_as<JSONArray>(json_oResponse.Get("players"));
+        JSONObject json_oPlayerSummary = view_as<JSONObject>(json_aPlayers.Get(0));
+        json_oPlayerSummary.GetString("avatarfull", g_sPlayerAvatar[iClient], sizeof(g_sPlayerAvatar));
+        #if SOURCEBRIDGE_DEBUG
+        PrintToServer("[Sourcebridge Debug] Avatar of Client %d is %s", iClient, g_sPlayerAvatar[iClient]);
+        #endif
+
+        delete json_oHttpResponse;
+        delete json_oResponse;
+        delete json_aPlayers;
+        delete json_oPlayerSummary;
+    }
 }
